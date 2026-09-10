@@ -347,6 +347,9 @@ tr.clickable:hover td{ background: var(--ink-tint); }
 
 
 
+
+
+
 <script type="module">
   // ==================== js/firebase-config.js ====================
 // ============================================================================
@@ -378,7 +381,7 @@ import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gsta
 import {
   getFirestore, collection, doc, getDoc, getDocs, setDoc, updateDoc, addDoc,
   deleteDoc, query, where, orderBy, limit, serverTimestamp, Timestamp, writeBatch,
-  enableIndexedDbPersistence, runTransaction
+  enableIndexedDbPersistence, runTransaction, getDocFromCache, getDocsFromCache
 } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js";
 
 const app = initializeApp(firebaseConfig);
@@ -513,11 +516,17 @@ function parseBoolish(v){
 // (típico "client is offline" que ocurre solo en el primerísimo intento,
 // antes de que el canal de red termine de establecerse). No reintenta
 // errores de permisos u otros fallos reales, solo los de conectividad.
-async function withRetry(fn, retries=3, delayMs=1000){
+// Además, pone un límite de tiempo a cada intento: si una petición se
+// queda "colgada" sin responder (ni éxito ni error), se da por fallida
+// en vez de esperar para siempre, y se reintenta o se avisa al usuario.
+function timeout(ms){
+  return new Promise((_, reject) => setTimeout(() => reject(new Error("network-timeout: la operación tardó demasiado")), ms));
+}
+async function withRetry(fn, retries=3, delayMs=1000, timeoutMs=15000){
   let lastErr;
   for (let i=0; i<=retries; i++){
     try{
-      return await fn();
+      return await Promise.race([ fn(), timeout(timeoutMs) ]);
     }catch(err){
       lastErr = err;
       const msg = (err && err.message) ? err.message.toLowerCase() : "";
@@ -527,6 +536,25 @@ async function withRetry(fn, retries=3, delayMs=1000){
     }
   }
   throw lastErr;
+}
+
+// Lectura "caché primero", al estilo offline-first de la app del comedor:
+// intenta leer al instante de la copia local (funciona aunque no haya red,
+// e incluye los cambios que la propia app acaba de escribir aunque no se
+// hayan sincronizado todavía) y solo si no hay nada en caché va al servidor.
+async function getDocsSmart(q){
+  try{
+    const snap = await getDocsFromCache(q);
+    if (!snap.empty) return snap;
+  }catch(e){ /* todavía no hay nada en caché: seguimos al servidor */ }
+  return await withRetry(() => getDocs(q));
+}
+async function getDocSmart(ref){
+  try{
+    const snap = await getDocFromCache(ref);
+    if (snap.exists()) return snap;
+  }catch(e){ /* todavía no hay nada en caché: seguimos al servidor */ }
+  return await withRetry(() => getDoc(ref));
 }
 
   // ==================== js/session.js ====================
@@ -556,7 +584,7 @@ async function checkAdminCredentials(name, password){
       where("password", "==", password),
       where("activo", "==", true)
     );
-    const snap = await getDocs(q);
+    const snap = await getDocsSmart(q);
     return !snap.empty;
   }catch(err){
     console.error("No se pudo comprobar el usuario administrador:", err);
@@ -607,25 +635,35 @@ async function logEvent(tipo, detalle=""){
 
 async function fetchLogs(max=300){
   const q = query(collection(db,"logs"), orderBy("creado_en","desc"), limit(max));
-  const snap = await withRetry(() => getDocs(q));
+  const snap = await getDocsSmart(q);
   return snap.docs.map(d=>({ id:d.id, ...d.data() }));
 }
 
   // ==================== js/counters.js ====================
 // Genera un número de expediente correlativo y único, tipo "2026-0001",
 // usando una transacción de Firestore para que nunca se repita aunque dos
-// personas guarden un parte casi a la vez.
+// personas guarden un parte casi a la vez. Las transacciones sí necesitan
+// conexión en vivo (no pueden resolverse solo con la copia local), así que
+// si no hay red a mano se usa un número provisional basado en la fecha y
+// hora, para que el trámite nunca se quede esperando.
 async function nextExpediente(){
   const year = new Date().getFullYear();
   const ref = doc(db, "contadores", `partes_${year}`);
-  const num = await withRetry(() => runTransaction(db, async (tx)=>{
-    const snap = await tx.get(ref);
-    const actual = snap.exists() ? (snap.data().ultimo || 0) : 0;
-    const siguiente = actual + 1;
-    tx.set(ref, { ultimo: siguiente }, { merge: true });
-    return siguiente;
-  }));
-  return `${year}-${String(num).padStart(4,"0")}`;
+  try{
+    const num = await withRetry(() => runTransaction(db, async (tx)=>{
+      const snap = await tx.get(ref);
+      const actual = snap.exists() ? (snap.data().ultimo || 0) : 0;
+      const siguiente = actual + 1;
+      tx.set(ref, { ultimo: siguiente }, { merge: true });
+      return siguiente;
+    }), 1, 600, 6000);
+    return `${year}-${String(num).padStart(4,"0")}`;
+  }catch(err){
+    console.warn("No se pudo generar el número de expediente correlativo (sin conexión); se usa uno provisional:", err);
+    const now = new Date();
+    const pad = n => String(n).padStart(2,"0");
+    return `${year}${pad(now.getMonth()+1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  }
 }
 
   // ==================== js/students.js ====================
@@ -635,7 +673,7 @@ function invalidateCache(){ _cache = null; }
 
 async function loadAllStudents(force=false){
   if (_cache && !force) return _cache;
-  const snap = await withRetry(() => getDocs(collection(db,"alumnado")));
+  const snap = await getDocsSmart(collection(db,"alumnado"));
   _cache = snap.docs.map(d=>({ id:d.id, ...d.data() }));
   _cache.sort((a,b)=> (a.apellido1+a.apellido2).localeCompare(b.apellido1+b.apellido2, "es"));
   return _cache;
@@ -652,7 +690,7 @@ async function searchStudents(text){
 }
 
 async function getStudent(id){
-  const snap = await withRetry(() => getDoc(doc(db,"alumnado", id)));
+  const snap = await getDocSmart(doc(db,"alumnado", id));
   return snap.exists() ? { id, ...snap.data() } : null;
 }
 
@@ -698,21 +736,27 @@ function rowToStudent(row){
 }
 
 async function importStudents(rows, onProgress){
-  const CHUNK = 400;
+  const CHUNK = 150;
   let creados = 0, actualizados = 0, omitidos = 0;
   const total = rows.length;
 
-  // Carga de una sola vez todo el alumnado ya existente (en vez de una
-  // lectura individual por fila, que con cientos de filas es lento y
-  // propenso a fallar justo en el primer intento, antes de que la
-  // conexión termine de establecerse).
-  const existingSnap = await withRetry(() => getDocs(collection(db,"alumnado")));
-  const existingMap = new Map();
-  existingSnap.docs.forEach(d => existingMap.set(d.id, d.data()));
+  // Carga de una sola vez todo el alumnado ya existente, preferiblemente
+  // desde la copia local (instantánea, funciona aunque no haya red). Si ni
+  // siquiera eso está disponible, seguimos igualmente: en el peor caso se
+  // trata todo como fila nueva/actualizada sin fusionar ediciones manuales,
+  // pero la importación nunca se queda bloqueada por esto.
+  let existingMap = new Map();
+  try{
+    const existingSnap = await getDocsSmart(collection(db,"alumnado"));
+    existingSnap.docs.forEach(d => existingMap.set(d.id, d.data()));
+  }catch(err){
+    console.warn("No se pudo comprobar el alumnado existente antes de importar:", err);
+  }
 
   for (let i=0; i<rows.length; i+=CHUNK){
     const chunk = rows.slice(i, i+CHUNK);
     const batch = writeBatch(db);
+    let huboEscrituras = false;
 
     for (const row of chunk){
       if (!clean(pick(buildRowIndex(row), "Nombre"))){ omitidos++; continue; }
@@ -751,8 +795,14 @@ async function importStudents(rows, onProgress){
         creados++;
         existingMap.set(id, {}); // evita tratar como "nuevo" otra vez si el CSV repite la fila
       }
+      huboEscrituras = true;
     }
-    await withRetry(() => batch.commit());
+    if (huboEscrituras){
+      // Al estilo offline-first del comedor: el lote se escribe al instante
+      // en la copia local y se sincroniza solo cuando haya red, sin hacer
+      // esperar a quien está importando.
+      batch.commit().catch(err => console.warn("Sincronización pendiente de un lote de alumnado:", err));
+    }
     if (onProgress) onProgress(Math.min(i+CHUNK, total), total);
   }
 
@@ -763,17 +813,17 @@ async function importStudents(rows, onProgress){
 
 async function updateStudentManually(id, changes){
   const ref = doc(db, "alumnado", id);
-  const snap = await getDoc(ref);
+  const snap = await getDocSmart(ref);
   const existing = snap.exists() ? snap.data() : {};
   const overrides = new Set(existing.manual_overrides || []);
   Object.keys(changes).forEach(k => overrides.add(k));
-  await updateDoc(ref, {
+  updateDoc(ref, {
     ...changes,
     manual_overrides: Array.from(overrides),
     actualizado_en: serverTimestamp()
-  });
+  }).catch(err => console.warn("Sincronización pendiente de la ficha del alumno:", err));
   invalidateCache();
-  await logEvent("editar_alumno", `${existing.apellido1||""}, ${existing.nombre||id} — campos: ${Object.keys(changes).join(", ")}`);
+  logEvent("editar_alumno", `${existing.apellido1||""}, ${existing.nombre||id} — campos: ${Object.keys(changes).join(", ")}`);
 }
 
 async function setServicioContratado(id, value){
@@ -893,6 +943,12 @@ async function fillAllianzPdf(parte){
   quitarAnotacionesFijas(pdfDoc, page);
   for (const c of CAMPOS_FIJOS){
     drawFit(page, font, c.text, c.x, c.y, 90, 9);
+  }
+  // Número de registro/siniestro que da la aseguradora por teléfono: va en
+  // el campo "Certificado" de la cabecera del formulario (recuadro real:
+  // x 534.7-584.3, línea inferior en 205.66).
+  if (parte.numero_registro_aseguradora){
+    drawFit(page, font, parte.numero_registro_aseguradora, 537, yOf(205.66), 46, 9);
   }
 
   const s = parte.alumno_snapshot || {};
@@ -1191,7 +1247,7 @@ function invalidatePartesCache(){ _partesCache = null; }
 async function loadAllPartes(force=false){
   if (_partesCache && !force) return _partesCache;
   const q = query(collection(db,"partes_accidente"), orderBy("creado_en","desc"));
-  const snap = await withRetry(() => getDocs(q));
+  const snap = await getDocsSmart(q);
   _partesCache = snap.docs.map(d=>({ id:d.id, ...d.data() }));
   return _partesCache;
 }
@@ -1271,7 +1327,7 @@ function parteFilename(p){
 }
 
 async function downloadParteById(id){
-  const snap = await withRetry(() => getDoc(doc(db,"partes_accidente", id)));
+  const snap = await getDocSmart(doc(db,"partes_accidente", id));
   if (!snap.exists()) return;
   const p = { id, ...snap.data() };
   const pdfBytes = await fillAllianzPdf(p);
@@ -1279,7 +1335,7 @@ async function downloadParteById(id){
 }
 
 async function renderParteDetail(id){
-  const snap = await withRetry(() => getDoc(doc(db,"partes_accidente", id)));
+  const snap = await getDocSmart(doc(db,"partes_accidente", id));
   if (!snap.exists()) return;
   const p = { id, ...snap.data() };
   const s = p.alumno_snapshot || {};
@@ -1300,6 +1356,7 @@ async function renderParteDetail(id){
           <p><b>Parte elaborado:</b> ${formatDateTimeEs(p.fecha_elaboracion)}</p>
           <p><b>Actividad:</b> ${esc(p.actividad)||"—"}</p>
           <p><b>Tiempo de espera al seguro:</b> ${p.tiempo_respuesta_segundos ? Math.round(p.tiempo_respuesta_segundos/60*10)/10 + " min" : "—"}</p>
+          <p><b>Nº de registro de la aseguradora:</b> ${esc(p.numero_registro_aseguradora) || "—"}</p>
         </div>
       </div>
       <hr class="hr">
@@ -1331,8 +1388,8 @@ async function renderParteDetail(id){
   document.getElementById("pd-edit").onclick = ()=> renderParteEdit(p, detail);
   document.getElementById("pd-delete").onclick = async ()=>{
     if (!confirm("¿Eliminar este parte de forma permanente? Esta acción no se puede deshacer.")) return;
-    await deleteDoc(doc(db,"partes_accidente", id));
-    await logEvent("eliminar_parte", `${p.numero_expediente||id} — ${s.apellido1}, ${s.nombre}`);
+    deleteDoc(doc(db,"partes_accidente", id)).catch(err => console.warn("Sincronización pendiente de la eliminación:", err));
+    logEvent("eliminar_parte", `${p.numero_expediente||id} — ${s.apellido1}, ${s.nombre}`);
     toast("Parte eliminado.", "ok");
     invalidatePartesCache();
     detail.innerHTML = "";
@@ -1367,6 +1424,7 @@ function renderParteEdit(p, container){
       <h3>Datos del accidente</h3>
       <div class="field"><label>Actividad</label><input id="ed-actividad" value="${esc(p.actividad)}"></div>
       <div class="field"><label>Descripción de los hechos</label><textarea id="ed-descripcion" rows="3">${esc(p.descripcion_hechos)}</textarea></div>
+      <div class="field"><label>Nº de registro de la aseguradora</label><input id="ed-registro" value="${esc(p.numero_registro_aseguradora)}" placeholder="Se anota en el campo 'Certificado' del PDF"></div>
 
       <h3>Otros datos</h3>
       <div class="toggle-row"><span>¿Atención médica?</span><label class="switch"><input type="checkbox" id="ed-am-si" ${p.atencion_medica?.si?"checked":""}><span class="track"></span></label></div>
@@ -1413,6 +1471,7 @@ function renderParteEdit(p, container){
         fecha_elaboracion: Timestamp.fromDate(inputValueToDate(document.getElementById("ed-felab").value)),
         actividad: document.getElementById("ed-actividad").value.trim(),
         descripcion_hechos: document.getElementById("ed-descripcion").value.trim(),
+        numero_registro_aseguradora: document.getElementById("ed-registro").value.trim(),
         atencion_medica: {
           si: document.getElementById("ed-am-si").checked,
           centro: document.getElementById("ed-am-centro").value.trim(),
@@ -1432,8 +1491,8 @@ function renderParteEdit(p, container){
           detalle: document.getElementById("ed-test-detalle").value.trim()
         }
       };
-      await updateDoc(doc(db,"partes_accidente", p.id), changes);
-      await logEvent("editar_parte", `${p.numero_expediente||p.id} — ${changes.alumno_snapshot.apellido1}, ${changes.alumno_snapshot.nombre}`);
+      updateDoc(doc(db,"partes_accidente", p.id), changes).catch(err => console.warn("Sincronización pendiente de la edición:", err));
+      logEvent("editar_parte", `${p.numero_expediente||p.id} — ${changes.alumno_snapshot.apellido1}, ${changes.alumno_snapshot.nombre}`);
       toast("Parte actualizado.", "ok");
       invalidatePartesCache();
       renderParteDetail(p.id);
@@ -1651,14 +1710,14 @@ function renderResult({ ok, title, message, pdfBytes, filename }){
 async function runTramite(){
   // 1) Fecha y hora del documento
   const fechaElaboracion = await askDateTime({
-    step: "1 / 7", title: "Fecha del documento",
+    step: "1 / 9", title: "Fecha del documento",
     question: "Confirma la fecha y hora en la que se está elaborando este parte.",
     initial: new Date()
   });
   if (!fechaElaboracion) return;
 
   // 2) Alumno accidentado
-  const alumnoId = await askStudent({ step: "2 / 7", title: "Alumno/a accidentado/a" });
+  const alumnoId = await askStudent({ step: "2 / 9", title: "Alumno/a accidentado/a" });
   if (!alumnoId) return;
   const alumno = await getStudent(alumnoId);
   if (!alumno) return;
@@ -1677,7 +1736,7 @@ async function runTramite(){
 
   // 4) Fecha y hora del accidente
   const fechaAccidente = await askDateTime({
-    step: "3 / 7", title: "Fecha del accidente",
+    step: "3 / 9", title: "Fecha del accidente",
     question: "Indica la fecha y hora en que ocurrió el accidente.",
     initial: fechaElaboracion
   });
@@ -1685,7 +1744,7 @@ async function runTramite(){
 
   // 5) Hechos y actividad — "indicar lo que pasó"
   const hechos = await askText({
-    step: "4 / 7", title: "Datos del accidente",
+    step: "4 / 9", title: "Datos del accidente",
     fields: [
       { key:"actividad", label:"¿Qué actividad desarrollaba en ese momento?", placeholder:"Ej. recreo, educación física..." },
       { key:"descripcion", label:"Explica con la mayor claridad posible cómo ocurrió el accidente", multiline:true }
@@ -1695,7 +1754,7 @@ async function runTramite(){
 
   // 6) Atención médica
   const medica = await askYesNo({
-    step: "5 / 7", title: "Atención médica", question: "¿Ha recibido atención médica?",
+    step: "5 / 9", title: "Atención médica", question: "¿Ha recibido atención médica?",
     extraFields: [
       { key:"centro", label:"Centro médico / facultativo" },
       { key:"diagnostico", label:"Pruebas realizadas y diagnóstico", multiline:true }
@@ -1705,20 +1764,20 @@ async function runTramite(){
 
   // 7) Autoridad, otra póliza y testigos
   const autoridad = await askYesNo({
-    step: "6 / 7", title: "Intervención de la autoridad", question: "¿Intervino la autoridad (policía, guardia civil...)?",
+    step: "6 / 9", title: "Intervención de la autoridad", question: "¿Intervino la autoridad (policía, guardia civil...)?",
     extraFields: [ { key:"cual", label:"¿Cuál?" }, { key:"localidad", label:"¿De qué localidad?" } ]
   });
   if (autoridad === null) return;
 
   const poliza = await askYesNo({
-    step: "6 / 7", title: "Otra póliza",
+    step: "7 / 9", title: "Otra póliza",
     question: "¿Tiene el tomador o el lesionado otra póliza de seguro que garantice este accidente?",
     extraFields: [ { key:"cual", label:"¿Cuál?" } ]
   });
   if (poliza === null) return;
 
   const testigos = await askYesNo({
-    step: "6 / 7", title: "Testigos", question: "¿Hubo testigos del accidente?",
+    step: "8 / 9", title: "Testigos", question: "¿Hubo testigos del accidente?",
     extraFields: [ { key:"detalle", label:"Nombre y datos de contacto de los testigos", multiline:true } ]
   });
   if (testigos === null) return;
@@ -1726,7 +1785,16 @@ async function runTramite(){
   // 8) Cronómetro de atención telefónica del seguro (opcional)
   const tiempoSegundos = await askStopwatchModal();
 
-  // 9) Montar, generar el PDF de Allianz y guardar
+  // 9) Número de registro/siniestro que da la aseguradora por teléfono
+  //    (último dato antes de generar el documento, tal y como se pidió).
+  const registro = await askText({
+    step: "9 / 9", title: "Número de registro de la aseguradora",
+    intro: "El número de registro o siniestro que te ha dado la aseguradora por teléfono, si ya lo tienes. Se anota en el campo \"Certificado\" del parte.",
+    fields: [ { key:"numero", label:"Número de registro / siniestro", placeholder:"Déjalo en blanco si aún no lo tienes" } ]
+  });
+  const numeroRegistro = registro ? registro.numero : "";
+
+  // 10) Montar, generar el PDF de Allianz y guardar
   const draft = {
     alumno_id: alumno.id,
     alumno_snapshot: {
@@ -1743,7 +1811,8 @@ async function runTramite(){
     intervino_autoridad: { si: autoridad.si, cual: autoridad.cual||"", localidad: autoridad.localidad||"" },
     otra_poliza: { si: poliza.si, cual: poliza.cual||"" },
     testigos: { si: testigos.si, detalle: testigos.detalle||"" },
-    tiempo_respuesta_segundos: tiempoSegundos
+    tiempo_respuesta_segundos: tiempoSegundos,
+    numero_registro_aseguradora: numeroRegistro
   };
 
   try{
@@ -1757,8 +1826,13 @@ async function runTramite(){
       creado_en: serverTimestamp(),
       estado: "completado"
     };
-    const ref = await withRetry(() => addDoc(collection(db,"partes_accidente"), payload));
-    await logEvent("crear_parte", `${numeroExpediente} — ${draft.alumno_snapshot.apellido1}, ${draft.alumno_snapshot.nombre}`);
+    // Al estilo offline-first del comedor: el ID se genera en el propio
+    // dispositivo (sin red) y el guardado se hace al instante en la copia
+    // local, sin esperar a que el servidor lo confirme. El parte y su PDF
+    // quedan listos aunque la conexión esté fallando en ese momento.
+    const ref = doc(collection(db,"partes_accidente"));
+    setDoc(ref, payload).catch(err => console.warn("Sincronización pendiente del parte:", err));
+    logEvent("crear_parte", `${numeroExpediente} — ${draft.alumno_snapshot.apellido1}, ${draft.alumno_snapshot.nombre}`);
     invalidatePartesCache();
 
     const filename = `parte-accidente_${slugify(draft.alumno_snapshot.apellido1+'-'+draft.alumno_snapshot.nombre)}_${slugify(formatDateTimeEs(draft.fecha_accidente))}.pdf`;
@@ -1779,7 +1853,7 @@ function askStopwatchModal(){
     const backdrop = document.getElementById("modal-backdrop");
     const box = document.getElementById("modal-box");
     box.innerHTML = `
-      <div class="modal-head"><h3>Tiempo de respuesta del seguro</h3><span class="step">7 / 7</span></div>
+      <div class="modal-head"><h3>Tiempo de respuesta del seguro</h3><span class="step">8 / 9</span></div>
       <div class="modal-body">
         <div class="q">Actívalo al llamar a la aseguradora para registrar cuánto tardan en atender (opcional).</div>
         <div id="sw-mount"></div>
@@ -2056,22 +2130,17 @@ async function renderTabUsuarios(){
     const nombre = document.getElementById("us-nombre").value.trim();
     const password = document.getElementById("us-pass").value;
     if (!nombre || !password){ toast("Indica nombre y contraseña.", "error"); return; }
-    try{
-      await addDoc(collection(db,"admin_usuarios"), {
-        nombre, nombre_lower: nombre.toLowerCase(), password, activo: true, creado_en: serverTimestamp()
-      });
-      logEvent("acceso_admin", `Usuario creado: ${nombre}`);
-      toast("Usuario creado.", "ok");
-      renderTabUsuarios();
-    }catch(err){
-      console.error(err);
-      toast("No se pudo crear el usuario: " + err.message, "error");
-    }
+    addDoc(collection(db,"admin_usuarios"), {
+      nombre, nombre_lower: nombre.toLowerCase(), password, activo: true, creado_en: serverTimestamp()
+    }).catch(err => console.warn("Sincronización pendiente del nuevo usuario:", err));
+    logEvent("acceso_admin", `Usuario creado: ${nombre}`);
+    toast("Usuario creado.", "ok");
+    renderTabUsuarios();
   };
 
   let rows = [];
   try{
-    const snap = await withRetry(() => getDocs(collection(db,"admin_usuarios")));
+    const snap = await getDocsSmart(collection(db,"admin_usuarios"));
     rows = snap.docs.map(d=>({ id:d.id, ...d.data() }));
   }catch(err){
     console.error(err);
@@ -2106,29 +2175,20 @@ async function renderTabUsuarios(){
   table.querySelectorAll("[data-toggle]").forEach(btn=>{
     btn.onclick = async ()=>{
       const activo = btn.dataset.active === "true";
-      try{
-        await updateDoc(doc(db,"admin_usuarios", btn.dataset.toggle), { activo: !activo });
-        logEvent("acceso_admin", `Usuario ${activo ? "desactivado" : "activado"}: ${btn.dataset.toggle}`);
-        renderTabUsuarios();
-      }catch(err){
-        console.error(err);
-        toast("No se pudo actualizar: " + err.message, "error");
-      }
+      updateDoc(doc(db,"admin_usuarios", btn.dataset.toggle), { activo: !activo })
+        .catch(err => console.warn("Sincronización pendiente:", err));
+      logEvent("acceso_admin", `Usuario ${activo ? "desactivado" : "activado"}: ${btn.dataset.toggle}`);
+      renderTabUsuarios();
     };
   });
   table.querySelectorAll("[data-del]").forEach(btn=>{
     btn.onclick = async ()=>{
       const row = rows.find(r=>r.id===btn.dataset.del);
       if (!confirm(`¿Eliminar el usuario "${row.nombre}"?`)) return;
-      try{
-        await deleteDoc(doc(db,"admin_usuarios", btn.dataset.del));
-        logEvent("acceso_admin", `Usuario eliminado: ${row.nombre}`);
-        toast("Usuario eliminado.", "ok");
-        renderTabUsuarios();
-      }catch(err){
-        console.error(err);
-        toast("No se pudo eliminar: " + err.message, "error");
-      }
+      deleteDoc(doc(db,"admin_usuarios", btn.dataset.del)).catch(err => console.warn("Sincronización pendiente:", err));
+      logEvent("acceso_admin", `Usuario eliminado: ${row.nombre}`);
+      toast("Usuario eliminado.", "ok");
+      renderTabUsuarios();
     };
   });
 }
@@ -2157,19 +2217,15 @@ async function renderTabEquipo(){
     if (!nombre){ toast("Indica un nombre.", "error"); return; }
     const rol = document.getElementById("eq-rol").value.trim();
     const notas = document.getElementById("eq-notas").value.trim();
-    try{
-      await addDoc(collection(db,"equipo_autorizado"), { nombre, rol, notas, creado_en: serverTimestamp() });
-      logEvent("acceso_admin", `Añadido al registro de acceso: ${nombre} (${rol})`);
-      toast("Añadido.", "ok");
-      renderTabEquipo();
-    }catch(err){
-      console.error(err);
-      toast("No se pudo guardar: " + err.message, "error");
-    }
+    addDoc(collection(db,"equipo_autorizado"), { nombre, rol, notas, creado_en: serverTimestamp() })
+      .catch(err => console.warn("Sincronización pendiente:", err));
+    logEvent("acceso_admin", `Añadido al registro de acceso: ${nombre} (${rol})`);
+    toast("Añadido.", "ok");
+    renderTabEquipo();
   };
   let rows = [];
   try{
-    const snap = await withRetry(() => getDocs(collection(db,"equipo_autorizado")));
+    const snap = await getDocsSmart(collection(db,"equipo_autorizado"));
     rows = snap.docs.map(d=>({ id:d.id, ...d.data() }));
   }catch(err){
     console.error(err);
@@ -2202,15 +2258,10 @@ async function renderTabEquipo(){
     btn.onclick = async ()=>{
       const row = rows.find(r=>r.id===btn.dataset.del);
       if (!confirm(`¿Quitar a ${row.nombre} del registro de acceso?`)) return;
-      try{
-        await deleteDoc(doc(db,"equipo_autorizado", btn.dataset.del));
-        logEvent("acceso_admin", `Eliminado del registro de acceso: ${row.nombre}`);
-        toast("Eliminado.", "ok");
-        renderTabEquipo();
-      }catch(err){
-        console.error(err);
-        toast("No se pudo eliminar: " + err.message, "error");
-      }
+      deleteDoc(doc(db,"equipo_autorizado", btn.dataset.del)).catch(err => console.warn("Sincronización pendiente:", err));
+      logEvent("acceso_admin", `Eliminado del registro de acceso: ${row.nombre}`);
+      toast("Eliminado.", "ok");
+      renderTabEquipo();
     };
   });
 }

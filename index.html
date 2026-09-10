@@ -346,6 +346,7 @@ tr.clickable:hover td{ background: var(--ink-tint); }
 
 
 
+
 <script type="module">
   // ==================== js/firebase-config.js ====================
 // ============================================================================
@@ -508,6 +509,26 @@ function parseBoolish(v){
   return null;
 }
 
+// Reintenta una operación de Firestore si falla al arrancar la conexión
+// (típico "client is offline" que ocurre solo en el primerísimo intento,
+// antes de que el canal de red termine de establecerse). No reintenta
+// errores de permisos u otros fallos reales, solo los de conectividad.
+async function withRetry(fn, retries=3, delayMs=1000){
+  let lastErr;
+  for (let i=0; i<=retries; i++){
+    try{
+      return await fn();
+    }catch(err){
+      lastErr = err;
+      const msg = (err && err.message) ? err.message.toLowerCase() : "";
+      const esDeConexion = msg.includes("offline") || msg.includes("unavailable") || msg.includes("network");
+      if (!esDeConexion || i === retries) throw err;
+      await new Promise(r => setTimeout(r, delayMs * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
   // ==================== js/session.js ====================
 // Clave compartida para entrar al menú Administrador (cámbiala cuando quieras).
 const ADMIN_PASSWORD = "2233";
@@ -586,7 +607,7 @@ async function logEvent(tipo, detalle=""){
 
 async function fetchLogs(max=300){
   const q = query(collection(db,"logs"), orderBy("creado_en","desc"), limit(max));
-  const snap = await getDocs(q);
+  const snap = await withRetry(() => getDocs(q));
   return snap.docs.map(d=>({ id:d.id, ...d.data() }));
 }
 
@@ -597,13 +618,13 @@ async function fetchLogs(max=300){
 async function nextExpediente(){
   const year = new Date().getFullYear();
   const ref = doc(db, "contadores", `partes_${year}`);
-  const num = await runTransaction(db, async (tx)=>{
+  const num = await withRetry(() => runTransaction(db, async (tx)=>{
     const snap = await tx.get(ref);
     const actual = snap.exists() ? (snap.data().ultimo || 0) : 0;
     const siguiente = actual + 1;
     tx.set(ref, { ultimo: siguiente }, { merge: true });
     return siguiente;
-  });
+  }));
   return `${year}-${String(num).padStart(4,"0")}`;
 }
 
@@ -614,7 +635,7 @@ function invalidateCache(){ _cache = null; }
 
 async function loadAllStudents(force=false){
   if (_cache && !force) return _cache;
-  const snap = await getDocs(collection(db,"alumnado"));
+  const snap = await withRetry(() => getDocs(collection(db,"alumnado")));
   _cache = snap.docs.map(d=>({ id:d.id, ...d.data() }));
   _cache.sort((a,b)=> (a.apellido1+a.apellido2).localeCompare(b.apellido1+b.apellido2, "es"));
   return _cache;
@@ -631,7 +652,7 @@ async function searchStudents(text){
 }
 
 async function getStudent(id){
-  const snap = await getDoc(doc(db,"alumnado", id));
+  const snap = await withRetry(() => getDoc(doc(db,"alumnado", id)));
   return snap.exists() ? { id, ...snap.data() } : null;
 }
 
@@ -681,6 +702,14 @@ async function importStudents(rows, onProgress){
   let creados = 0, actualizados = 0, omitidos = 0;
   const total = rows.length;
 
+  // Carga de una sola vez todo el alumnado ya existente (en vez de una
+  // lectura individual por fila, que con cientos de filas es lento y
+  // propenso a fallar justo en el primer intento, antes de que la
+  // conexión termine de establecerse).
+  const existingSnap = await withRetry(() => getDocs(collection(db,"alumnado")));
+  const existingMap = new Map();
+  existingSnap.docs.forEach(d => existingMap.set(d.id, d.data()));
+
   for (let i=0; i<rows.length; i+=CHUNK){
     const chunk = rows.slice(i, i+CHUNK);
     const batch = writeBatch(db);
@@ -692,10 +721,9 @@ async function importStudents(rows, onProgress){
       const servicioFromCsv = incoming._servicioFromCsv;
       delete incoming._servicioFromCsv;
       const ref = doc(db, "alumnado", id);
-      const existingSnap = await getDoc(ref);
+      const existing = existingMap.get(id);
 
-      if (existingSnap.exists()){
-        const existing = existingSnap.data();
+      if (existing){
         const overrides = existing.manual_overrides || [];
         const merged = { ...incoming };
         for (const field of overrides){
@@ -721,14 +749,15 @@ async function importStudents(rows, onProgress){
           actualizado_en: serverTimestamp()
         });
         creados++;
+        existingMap.set(id, {}); // evita tratar como "nuevo" otra vez si el CSV repite la fila
       }
     }
-    await batch.commit();
+    await withRetry(() => batch.commit());
     if (onProgress) onProgress(Math.min(i+CHUNK, total), total);
   }
 
   invalidateCache();
-  await logEvent("importar_alumnado", `${creados} creados, ${actualizados} actualizados, ${omitidos} omitidos (de ${total} filas)`);
+  logEvent("importar_alumnado", `${creados} creados, ${actualizados} actualizados, ${omitidos} omitidos (de ${total} filas)`);
   return { creados, actualizados, omitidos };
 }
 
@@ -1162,7 +1191,7 @@ function invalidatePartesCache(){ _partesCache = null; }
 async function loadAllPartes(force=false){
   if (_partesCache && !force) return _partesCache;
   const q = query(collection(db,"partes_accidente"), orderBy("creado_en","desc"));
-  const snap = await getDocs(q);
+  const snap = await withRetry(() => getDocs(q));
   _partesCache = snap.docs.map(d=>({ id:d.id, ...d.data() }));
   return _partesCache;
 }
@@ -1242,7 +1271,7 @@ function parteFilename(p){
 }
 
 async function downloadParteById(id){
-  const snap = await getDoc(doc(db,"partes_accidente", id));
+  const snap = await withRetry(() => getDoc(doc(db,"partes_accidente", id)));
   if (!snap.exists()) return;
   const p = { id, ...snap.data() };
   const pdfBytes = await fillAllianzPdf(p);
@@ -1250,7 +1279,7 @@ async function downloadParteById(id){
 }
 
 async function renderParteDetail(id){
-  const snap = await getDoc(doc(db,"partes_accidente", id));
+  const snap = await withRetry(() => getDoc(doc(db,"partes_accidente", id)));
   if (!snap.exists()) return;
   const p = { id, ...snap.data() };
   const s = p.alumno_snapshot || {};
@@ -1728,7 +1757,7 @@ async function runTramite(){
       creado_en: serverTimestamp(),
       estado: "completado"
     };
-    const ref = await addDoc(collection(db,"partes_accidente"), payload);
+    const ref = await withRetry(() => addDoc(collection(db,"partes_accidente"), payload));
     await logEvent("crear_parte", `${numeroExpediente} — ${draft.alumno_snapshot.apellido1}, ${draft.alumno_snapshot.nombre}`);
     invalidatePartesCache();
 
@@ -2042,7 +2071,7 @@ async function renderTabUsuarios(){
 
   let rows = [];
   try{
-    const snap = await getDocs(collection(db,"admin_usuarios"));
+    const snap = await withRetry(() => getDocs(collection(db,"admin_usuarios")));
     rows = snap.docs.map(d=>({ id:d.id, ...d.data() }));
   }catch(err){
     console.error(err);
@@ -2140,7 +2169,7 @@ async function renderTabEquipo(){
   };
   let rows = [];
   try{
-    const snap = await getDocs(collection(db,"equipo_autorizado"));
+    const snap = await withRetry(() => getDocs(collection(db,"equipo_autorizado")));
     rows = snap.docs.map(d=>({ id:d.id, ...d.data() }));
   }catch(err){
     console.error(err);

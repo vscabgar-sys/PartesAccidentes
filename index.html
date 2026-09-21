@@ -420,6 +420,27 @@ tr.clickable:hover td{ background: var(--ink-tint); }
   .ficha-grid{ grid-template-columns: 1fr; }
 }
 
+/* ---------- Panel flotante: datos que pedirá Allianz al llamar ---------- */
+.modal-backdrop{ gap: 1em; }
+.panel-aseguradora{
+  background:#fff; border-radius: var(--radius-lg); width: 270px; max-width: 90vw;
+  box-shadow: var(--shadow-lg); padding: 1.1em 1.3em; align-self: flex-start;
+  max-height: 92vh; overflow-y:auto;
+}
+.panel-aseguradora h4{
+  font-family:'Source Serif 4', serif; font-size:.92rem; font-weight:600; color: var(--ink);
+  margin: 0 0 .8em 0; padding-bottom:.5em; border-bottom: 1px solid var(--line-soft);
+}
+.panel-aseguradora ol{ margin:0; padding-left:1.15em; display:flex; flex-direction:column; gap:.75em; }
+.panel-aseguradora li{ font-size:.83rem; color: var(--slate); line-height:1.35; }
+.panel-aseguradora li b{ display:block; color: var(--ink); font-weight:600; font-size:.78rem; }
+
+@media (max-width: 900px){
+  .modal-backdrop{ flex-direction: column; }
+  .panel-aseguradora{ width:100%; max-width:480px; order:2; }
+  .modal-box{ order:1; }
+}
+
 </style>
 </head>
 <body>
@@ -2972,15 +2993,38 @@ async function runTramite(){
   }
 }
 
+// Datos fijos del centro/póliza que la aseguradora pide siempre al
+// descolgar, para tenerlos a mano sin tener que buscarlos durante la
+// llamada.
+function crearPanelDatosAseguradora(){
+  const panel = document.createElement("div");
+  panel.className = "panel-aseguradora";
+  panel.id = "panel-aseguradora";
+  panel.innerHTML = `
+    <h4>📞 Datos que te solicitarán al llamar</h4>
+    <ol>
+      <li><b>Empresa o colectivo asegurado</b>ECHEYDE COOPERATIVA — F38026951</li>
+      <li><b>Número de póliza de Allianz</b>58910162</li>
+      <li><b>Dirección</b>C/ El Pajarito, 1 · 38296 La Laguna</li>
+      <li><b>Sucursal / Mediador</b>673 / 6733106</li>
+    </ol>
+  `;
+  return panel;
+}
+
 // Ficha completa del alumno (todos los datos importados, incluidos los dos
 // responsables) + cronómetro, para tenerlo todo a la vista mientras se
 // llama a la aseguradora. Al pulsar "Finalizar llamada" se detiene el
-// crono y se devuelve el tiempo transcurrido.
+// crono y se devuelve el tiempo transcurrido. Junto a la ventana, de
+// manera flotante a su izquierda, se muestra un panel con los datos que
+// Allianz siempre pide al principio de la llamada.
 function askCallWithStudentInfo({ step, alumno }){
   return new Promise((resolve)=>{
     const backdrop = document.getElementById("modal-backdrop");
     const box = document.getElementById("modal-box");
     box.classList.add("modal-box-wide");
+    const panel = crearPanelDatosAseguradora();
+    backdrop.insertBefore(panel, box);
 
     const responsable = (r, n) => {
       if (!r || !r.nombre) return "";
@@ -3026,6 +3070,7 @@ function askCallWithStudentInfo({ step, alumno }){
     document.getElementById("sw-continue").onclick = ()=>{
       const segundos = sw.getSeconds();
       sw.destroy();
+      panel.remove();
       backdrop.classList.remove("show");
       box.classList.remove("modal-box-wide");
       box.innerHTML = "";

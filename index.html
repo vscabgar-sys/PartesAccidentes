@@ -3,6 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Evita que el navegador reutilice una copia antigua de esta página desde
+     su caché local. GitHub Pages no permite fijar cabeceras HTTP propias,
+     así que esto se complementa con la comprobación de versión en tiempo
+     real que hace main.js (ver APP_VERSION más abajo). -->
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<meta name="app-version" content="2026-09-21-01">
 <title>Parte de Accidente — Echeyde</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -209,6 +217,21 @@ tr.clickable:hover td{ background: var(--ink-tint); }
 #toast.show{ opacity:1; transform:none; }
 #toast.error{ background: var(--burgundy); }
 #toast.ok{ background: var(--forest); }
+
+/* Aviso de nueva versión publicada: banner fijo en lo alto de la página,
+   por encima de todo lo demás (incluidas las pantallas de bloqueo por
+   dispositivo), porque conviene verlo se esté donde se esté en la app. */
+#banner-nueva-version{
+  position: sticky; top:0; left:0; right:0; z-index:500;
+  background: var(--burgundy); color:#fff;
+  padding:.6em 1em; display:flex; align-items:center; justify-content:center;
+  gap:1em; flex-wrap:wrap; font-size:.88rem; box-shadow: var(--shadow);
+}
+#banner-nueva-version button{
+  background:#fff; color: var(--burgundy); border:none; border-radius: var(--radius);
+  padding:.4em 1em; font-weight:600; font-size:.85rem; cursor:pointer;
+}
+#banner-nueva-version button:hover{ opacity:.9; }
 
 /* Pantalla bloqueante de control de dispositivo (pendiente / revocado / solicitar),
    al estilo de la app del Comedor Echeyde. */
@@ -3664,9 +3687,52 @@ function navigate(id){
   if (render) render();
 }
 
+// ---- Aviso de nueva versión publicada ----
+// GitHub Pages no permite fijar cabeceras de caché propias, así que un
+// equipo puede quedarse viendo una copia antigua de la página aunque ya se
+// haya publicado una nueva. Para no depender de que cada persona sepa
+// borrar la caché del navegador, la propia app comprueba de vez en cuando
+// (y nada más abrirla) si la versión publicada en GitHub es distinta de la
+// que tiene cargada, y si lo es, avisa con un banner fijo para actualizar
+// con un solo clic — sin esperar a que alguien note que algo "no cuadra".
+const APP_VERSION = document.querySelector('meta[name="app-version"]').content;
+
+function mostrarAvisoNuevaVersion(){
+  if (document.getElementById("banner-nueva-version")) return;
+  const div = document.createElement("div");
+  div.id = "banner-nueva-version";
+  div.innerHTML = `
+    <span>📦 Hay una nueva versión de la app publicada.</span>
+    <button id="btn-recargar-version">Actualizar ahora</button>
+  `;
+  document.body.insertBefore(div, document.body.firstChild);
+  document.getElementById("btn-recargar-version").addEventListener("click", ()=>{
+    location.reload();
+  });
+}
+
+async function comprobarVersionNueva(){
+  try{
+    const resp = await fetch(location.pathname + "?_v=" + Date.now(), { cache: "no-store" });
+    if (!resp.ok) return;
+    const html = await resp.text();
+    const m = html.match(/<meta name="app-version" content="([^"]+)">/);
+    if (m && m[1] && m[1] !== APP_VERSION) mostrarAvisoNuevaVersion();
+  }catch(err){
+    // Sin conexión o red restringida: no se molesta al usuario por esto,
+    // ya se volverá a comprobar más adelante.
+  }
+}
+
 document.addEventListener("DOMContentLoaded", ()=>{
   buildTopbar();
   wireDispositivoScreens();
+  // Primera comprobación de versión a los pocos segundos de abrir la app
+  // (para no competir con la carga inicial) y luego cada 3 minutos
+  // mientras se mantenga abierta, por si se publica una actualización
+  // durante una sesión larga.
+  setTimeout(comprobarVersionNueva, 4000);
+  setInterval(comprobarVersionNueva, 3 * 60 * 1000);
   // La interfaz se muestra siempre al instante, sin esperar a Firebase.
   navigate("landing");
   // La sesión anónima (necesaria para leer/escribir en Firestore) se

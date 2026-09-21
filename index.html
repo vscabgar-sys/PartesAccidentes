@@ -434,6 +434,9 @@ tr.clickable:hover td{ background: var(--ink-tint); }
 .panel-aseguradora ol{ margin:0; padding-left:1.15em; display:flex; flex-direction:column; gap:.75em; }
 .panel-aseguradora li{ font-size:.83rem; color: var(--slate); line-height:1.35; }
 .panel-aseguradora li b{ display:block; color: var(--ink); font-weight:600; font-size:.78rem; }
+.panel-aseguradora-sub{ list-style:disc; margin:.5em 0 0; padding-left:1.1em; display:flex; flex-direction:column; gap:.6em; }
+.panel-aseguradora-sub li{ font-size:.8rem; font-weight:400; }
+.panel-aseguradora-sub li b{ display:inline; color: var(--ink); font-weight:600; font-size:.8rem; }
 
 @media (max-width: 900px){
   .modal-backdrop{ flex-direction: column; }
@@ -3003,6 +3006,13 @@ function crearPanelDatosAseguradora(){
   panel.innerHTML = `
     <h4>📞 Datos que te solicitarán al llamar</h4>
     <ol>
+      <li><b>Teléfono de la aseguradora</b>900 404 444</li>
+      <li><b>Centros médicos autorizados</b>
+        <ul class="panel-aseguradora-sub">
+          <li><b>Hospital Quirónsalud Tenerife</b><br>Calle Agustín de Foxá, 8, Santa Cruz de Tenerife<br>Tel: 922 57 41 00</li>
+          <li><b>Clínica Parque</b><br>Calle Méndez Núñez, 40, Santa Cruz de Tenerife<br>Tel: 922 27 44 00</li>
+        </ul>
+      </li>
       <li><b>Empresa o colectivo asegurado</b>ECHEYDE COOPERATIVA — F38026951</li>
       <li><b>Número de póliza de Allianz</b>58910162</li>
       <li><b>Dirección</b>C/ El Pajarito, 1 · 38296 La Laguna</li>

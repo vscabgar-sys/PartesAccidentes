@@ -25,7 +25,7 @@ if (location.search.indexOf("_v=") === -1){
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<meta name="app-version" content="2026-09-22-03">
+<meta name="app-version" content="2026-09-22-04">
 <title>Parte de Accidente — Echeyde</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -2240,7 +2240,12 @@ async function renderParteDetail(id, detailElId="hist-detail"){
     });
   }
 
-  detail.querySelector("#inc-drop").addEventListener("click", ()=> detail.querySelector("#inc-file-input").click());
+  // No hace falta ningún listener de "click" en la etiqueta "#inc-drop":
+  // el campo de archivo está DENTRO de esa etiqueta (<label>), así que el
+  // propio navegador ya abre el selector de archivos al pulsarla. Añadir
+  // aquí un segundo "click()" por código duplicaba la apertura del
+  // selector — a veces incluso volvía a abrirlo justo después de elegir un
+  // archivo, dando la sensación de que "no adjuntaba nada".
   detail.querySelector("#inc-file-input").addEventListener("change", (e)=>{
     // Los adjuntos se guardan dentro del propio registro de Firestore, que
     // tiene un tope fijo de 1 MB por documento (igual en el plan gratuito

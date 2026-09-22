@@ -25,7 +25,7 @@ if (location.search.indexOf("_v=") === -1){
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<meta name="app-version" content="2026-09-22-01">
+<meta name="app-version" content="2026-09-22-03">
 <title>Parte de Accidente — Echeyde</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -2147,7 +2147,7 @@ async function renderParteDetail(id, detailElId="hist-detail"){
         <div id="inc-adjuntos-list"></div>
         <label class="upload-drop" id="inc-drop" style="margin-top:.6em;">
           <input type="file" id="inc-file-input" multiple style="display:none;">
-          📎 Añadir documento (máx. 400 KB por archivo)
+          📎 Añadir documento (máx. 500 KB por archivo)
         </label>
       </div>
       <button class="btn btn-primary" id="inc-save" style="margin-top:.8em;">Guardar incidencia</button>
@@ -2242,13 +2242,19 @@ async function renderParteDetail(id, detailElId="hist-detail"){
 
   detail.querySelector("#inc-drop").addEventListener("click", ()=> detail.querySelector("#inc-file-input").click());
   detail.querySelector("#inc-file-input").addEventListener("change", (e)=>{
-    const MAX_FILE = 400*1024;
+    // Los adjuntos se guardan dentro del propio registro de Firestore, que
+    // tiene un tope fijo de 1 MB por documento (igual en el plan gratuito
+    // que en cualquier otro — no depende del dinero). Este límite por
+    // archivo, y el total de más abajo, están calculados para quedarse
+    // dentro de ese tope con margen de sobra para el resto de los datos
+    // del parte.
+    const MAX_FILE = 500*1024;
     const files = Array.from(e.target.files || []);
     let pendientes = files.length;
     if (pendientes===0) return;
     files.forEach(file=>{
       if (file.size > MAX_FILE){
-        toast(`"${file.name}" pesa demasiado (máx. 400 KB).`, "error");
+        toast(`"${file.name}" pesa demasiado (máx. 500 KB).`, "error");
         pendientes--;
         return;
       }
@@ -2264,7 +2270,7 @@ async function renderParteDetail(id, detailElId="hist-detail"){
 
   detail.querySelector("#inc-save").onclick = ()=>{
     const totalBytes = adjuntos.reduce((sum,a)=> sum + (a.datos ? a.datos.length : 0), 0);
-    if (totalBytes > 900*1024){
+    if (totalBytes > 950*1024){
       toast("El total de adjuntos es demasiado grande. Quita alguno antes de guardar.", "error");
       return;
     }

@@ -25,7 +25,7 @@ if (location.search.indexOf("_v=") === -1){
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<meta name="app-version" content="2026-09-21-02">
+<meta name="app-version" content="2026-09-22-01">
 <title>Parte de Accidente — Echeyde</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -2195,7 +2195,16 @@ async function renderParteDetail(id, detailElId="hist-detail"){
     ${bloqueIncidencia}
   `;
 
-  document.getElementById("pd-download").onclick = async (e)=>{
+  // Ojo: estos botones e inputs comparten los mismos "id" tanto si este
+  // parte se está viendo desde el Registro público (#reg-detail) como desde
+  // la pestaña "Partes de accidente" del panel de Administrador
+  // (#hist-detail) — y ninguna de las dos vistas se destruye realmente al
+  // navegar a la otra, solo se ocultan. Por eso NUNCA se busca con
+  // document.getElementById(...) aquí (siempre encontraría el primero de
+  // los dos que exista en la página, aunque esté oculto): se busca siempre
+  // dentro de "detail", que es el contenedor concreto que se acaba de
+  // rellenar más arriba.
+  detail.querySelector("#pd-download").onclick = async (e)=>{
     const btn = e.target;
     btn.disabled = true; btn.textContent = "Generando...";
     try{
@@ -2215,7 +2224,7 @@ async function renderParteDetail(id, detailElId="hist-detail"){
   renderAdjuntosList();
 
   function renderAdjuntosList(){
-    const el = document.getElementById("inc-adjuntos-list");
+    const el = detail.querySelector("#inc-adjuntos-list");
     if (adjuntos.length===0){
       el.innerHTML = `<p class="muted">Sin documentos adjuntos todavía.</p>`;
       return;
@@ -2231,8 +2240,8 @@ async function renderParteDetail(id, detailElId="hist-detail"){
     });
   }
 
-  document.getElementById("inc-drop").addEventListener("click", ()=> document.getElementById("inc-file-input").click());
-  document.getElementById("inc-file-input").addEventListener("change", (e)=>{
+  detail.querySelector("#inc-drop").addEventListener("click", ()=> detail.querySelector("#inc-file-input").click());
+  detail.querySelector("#inc-file-input").addEventListener("change", (e)=>{
     const MAX_FILE = 400*1024;
     const files = Array.from(e.target.files || []);
     let pendientes = files.length;
@@ -2253,15 +2262,15 @@ async function renderParteDetail(id, detailElId="hist-detail"){
     e.target.value = "";
   });
 
-  document.getElementById("inc-save").onclick = ()=>{
+  detail.querySelector("#inc-save").onclick = ()=>{
     const totalBytes = adjuntos.reduce((sum,a)=> sum + (a.datos ? a.datos.length : 0), 0);
     if (totalBytes > 900*1024){
       toast("El total de adjuntos es demasiado grande. Quita alguno antes de guardar.", "error");
       return;
     }
     const incidencia = {
-      marcada: document.getElementById("inc-marcada").checked,
-      descripcion: document.getElementById("inc-descripcion").value.trim(),
+      marcada: detail.querySelector("#inc-marcada").checked,
+      descripcion: detail.querySelector("#inc-descripcion").value.trim(),
       adjuntos,
       actualizado_en: serverTimestamp()
     };
@@ -2270,8 +2279,8 @@ async function renderParteDetail(id, detailElId="hist-detail"){
     invalidatePartesCache();
     toast("Incidencia guardada.", "ok");
   };
-  document.getElementById("pd-edit").onclick = ()=> renderParteEdit(p, detail, detailElId);
-  document.getElementById("pd-delete").onclick = async ()=>{
+  detail.querySelector("#pd-edit").onclick = ()=> renderParteEdit(p, detail, detailElId);
+  detail.querySelector("#pd-delete").onclick = async ()=>{
     if (!confirm("¿Eliminar este parte de forma permanente? Esta acción no se puede deshacer.")) return;
     trackWrite(deleteDoc(doc(db,"partes_accidente", id)));
     logEvent("eliminar_parte", `${p.numero_expediente||id} — ${s.apellido1}, ${s.nombre}`);
@@ -2333,47 +2342,52 @@ function renderParteEdit(p, container, detailElId="hist-detail"){
       </div>
     </div>
   `;
-  document.getElementById("ed-cancel").onclick = ()=> renderParteDetail(p.id, detailElId);
-  document.getElementById("ed-save").onclick = async ()=>{
-    const btn = document.getElementById("ed-save");
+  // Mismo motivo que en renderParteDetail: se busca siempre dentro de
+  // "container" (el contenedor propio de esta vista), nunca con
+  // document.getElementById directo, porque estos mismos "id" de campo
+  // pueden existir a la vez, ocultos, en la otra vista (Admin / Registro
+  // público) si esa otra vista también estaba a medio editar.
+  container.querySelector("#ed-cancel").onclick = ()=> renderParteDetail(p.id, detailElId);
+  container.querySelector("#ed-save").onclick = async ()=>{
+    const btn = container.querySelector("#ed-save");
     btn.disabled = true; btn.textContent = "Guardando...";
     try{
-      const [apellido1, ...rest] = document.getElementById("ed-apellidos").value.trim().split(" ");
+      const [apellido1, ...rest] = container.querySelector("#ed-apellidos").value.trim().split(" ");
       const changes = {
         alumno_snapshot: {
           ...s,
           apellido1: apellido1 || "",
           apellido2: rest.join(" "),
-          nombre: document.getElementById("ed-nombre").value.trim(),
-          calle: document.getElementById("ed-calle").value.trim(),
-          cp: document.getElementById("ed-cp").value.trim(),
-          poblacion: document.getElementById("ed-poblacion").value.trim(),
-          provincia: document.getElementById("ed-provincia").value.trim(),
-          telefono: document.getElementById("ed-telefono").value.trim(),
-          nif: document.getElementById("ed-nif").value.trim()
+          nombre: container.querySelector("#ed-nombre").value.trim(),
+          calle: container.querySelector("#ed-calle").value.trim(),
+          cp: container.querySelector("#ed-cp").value.trim(),
+          poblacion: container.querySelector("#ed-poblacion").value.trim(),
+          provincia: container.querySelector("#ed-provincia").value.trim(),
+          telefono: container.querySelector("#ed-telefono").value.trim(),
+          nif: container.querySelector("#ed-nif").value.trim()
         },
-        fecha_accidente: Timestamp.fromDate(inputValueToDate(document.getElementById("ed-facc").value)),
-        fecha_elaboracion: Timestamp.fromDate(inputValueToDate(document.getElementById("ed-felab").value)),
-        actividad: document.getElementById("ed-actividad").value.trim(),
-        descripcion_hechos: document.getElementById("ed-descripcion").value.trim(),
-        numero_registro_aseguradora: document.getElementById("ed-registro").value.trim(),
+        fecha_accidente: Timestamp.fromDate(inputValueToDate(container.querySelector("#ed-facc").value)),
+        fecha_elaboracion: Timestamp.fromDate(inputValueToDate(container.querySelector("#ed-felab").value)),
+        actividad: container.querySelector("#ed-actividad").value.trim(),
+        descripcion_hechos: container.querySelector("#ed-descripcion").value.trim(),
+        numero_registro_aseguradora: container.querySelector("#ed-registro").value.trim(),
         atencion_medica: {
-          si: document.getElementById("ed-am-si").checked,
-          centro: document.getElementById("ed-am-centro").value.trim(),
-          diagnostico: document.getElementById("ed-am-diag").value.trim()
+          si: container.querySelector("#ed-am-si").checked,
+          centro: container.querySelector("#ed-am-centro").value.trim(),
+          diagnostico: container.querySelector("#ed-am-diag").value.trim()
         },
         intervino_autoridad: {
-          si: document.getElementById("ed-aut-si").checked,
-          cual: document.getElementById("ed-aut-cual").value.trim(),
-          localidad: document.getElementById("ed-aut-loc").value.trim()
+          si: container.querySelector("#ed-aut-si").checked,
+          cual: container.querySelector("#ed-aut-cual").value.trim(),
+          localidad: container.querySelector("#ed-aut-loc").value.trim()
         },
         otra_poliza: {
-          si: document.getElementById("ed-pol-si").checked,
-          cual: document.getElementById("ed-pol-cual").value.trim()
+          si: container.querySelector("#ed-pol-si").checked,
+          cual: container.querySelector("#ed-pol-cual").value.trim()
         },
         testigos: {
-          si: document.getElementById("ed-test-si").checked,
-          detalle: document.getElementById("ed-test-detalle").value.trim()
+          si: container.querySelector("#ed-test-si").checked,
+          detalle: container.querySelector("#ed-test-detalle").value.trim()
         }
       };
       trackWrite(updateDoc(doc(db,"partes_accidente", p.id), changes));

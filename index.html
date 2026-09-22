@@ -2,15 +2,30 @@
 <html lang="es">
 <head>
 <meta charset="utf-8">
+<script>
+// Anti-caché "a prueba de balas": cada vez que alguien abre la URL a pelo
+// (tecleada o desde favoritos, sin parámetro "_v"), esta línea se ejecuta
+// ANTES de que el navegador cargue nada más y redirige al instante a esa
+// misma dirección con un sello de tiempo añadido (?_v=...). Como esa URL
+// exacta nunca se ha pedido antes, ni el navegador ni ningún proxy/CDN de
+// por medio puede tener una copia guardada de ella: obliga a pedirle a
+// GitHub el archivo de verdad, siempre. El aviso de "nueva versión" de
+// más abajo (main.js) queda como segunda red de seguridad para cuando la
+// página se deja abierta muchas horas sin recargar.
+if (location.search.indexOf("_v=") === -1){
+  location.replace(location.pathname + "?_v=" + Date.now());
+}
+</script>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <!-- Evita que el navegador reutilice una copia antigua de esta página desde
      su caché local. GitHub Pages no permite fijar cabeceras HTTP propias,
-     así que esto se complementa con la comprobación de versión en tiempo
-     real que hace main.js (ver APP_VERSION más abajo). -->
+     así que esto se complementa con la redirección anti-caché de arriba y
+     la comprobación de versión en tiempo real que hace main.js (ver
+     APP_VERSION más abajo). -->
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<meta name="app-version" content="2026-09-21-01">
+<meta name="app-version" content="2026-09-21-02">
 <title>Parte de Accidente — Echeyde</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>

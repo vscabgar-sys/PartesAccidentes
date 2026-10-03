@@ -25,7 +25,7 @@ if (location.search.indexOf("_v=") === -1){
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<meta name="app-version" content="2026-09-27-01">
+<meta name="app-version" content="2026-10-02-01">
 <title>Parte de Accidente — Echeyde</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -327,6 +327,16 @@ tr.clickable:hover td{ background: var(--ink-tint); }
 .muted{ color: var(--slate-light); font-size:.83rem; }
 .hr{ border:none; border-top:1px solid var(--line); margin: 1.4em 0; }
 .grid-2{ display:grid; grid-template-columns:1fr 1fr; gap:1em; }
+
+/* ---------- Informes: cuadrícula de cifras resumen ---------- */
+.stat-grid{ display:grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .8em; margin: .4em 0 .2em; }
+.stat-tile{
+  background: var(--ink-tint); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: .9em 1em; text-align:left;
+}
+.stat-valor{ font-family:'Source Serif 4', serif; font-size:1.5rem; font-weight:700; color: var(--ink-deep); line-height:1.1; }
+.stat-etiqueta{ font-size:.76rem; color: var(--slate-light); margin-top:.3em; }
+
 .upload-drop{ border: 1.5px dashed var(--line); border-radius: var(--radius); padding: 1.8em; text-align:center; color: var(--slate); font-size:.87rem; cursor:pointer; background: var(--paper); }
 .upload-drop:hover{ border-color: var(--ink); }
 .small-note{ font-size:.76rem; color: var(--slate-light); margin-top:.3em; }
@@ -3517,6 +3527,7 @@ const ADMIN_TABS = [
   { id:"dispositivos", label:"Dispositivos", render: renderTabDispositivos },
   { id:"alumnado", label:"Alumnado", render: renderTabAlumnado },
   { id:"partes", label:"Partes de accidente", render: renderTabPartes },
+  { id:"informes", label:"Informes", render: renderTabInformes },
   { id:"fincurso", label:"Fin de curso", render: renderTabFinCurso },
 ];
 
@@ -3862,6 +3873,243 @@ function renderTabAlumnado(){
 function renderTabPartes(){
   tabContainer().innerHTML = `<div id="view-historial" class="view active"></div>`;
   renderHistorial();
+}
+
+// ---- Informes: estadísticas y listado de los partes elaborados en un
+// periodo a elegir (un rango de fechas concreto, o un mes/trimestre/año
+// completo), con descarga en Excel. Se apoya en los mismos datos y
+// funciones (loadAllPartes, parteToRow, XLSX...) que ya usan el Historial
+// y la copia de fin de curso, así que no duplica nada de la base de datos. ----
+
+const TIPO_TRAMITE_LABEL_INFORME = { accidente: "Parte de Accidente", gafas: "Rotura de Gafas", otros: "Otros" };
+const TRIMESTRES_INFORME = [
+  { v:1, label:"1er trimestre (ene-mar)", mesIni:0, mesFin:2 },
+  { v:2, label:"2º trimestre (abr-jun)", mesIni:3, mesFin:5 },
+  { v:3, label:"3er trimestre (jul-sep)", mesIni:6, mesFin:8 },
+  { v:4, label:"4º trimestre (oct-dic)", mesIni:9, mesFin:11 },
+];
+
+function parteFechaElaboracion(p){
+  const f = p.fecha_elaboracion;
+  if (!f) return null;
+  return f.toDate ? f.toDate() : (f instanceof Date ? f : new Date(f));
+}
+
+// Devuelve {inicio, fin} (fin exclusivo) según el tipo de periodo elegido.
+function calcularRangoInforme(tipo, form){
+  const hoy = new Date();
+  if (tipo === "rango"){
+    const desde = inputValueToDate(document.getElementById("inf-desde").value ? document.getElementById("inf-desde").value + "T00:00" : "");
+    const hastaStr = document.getElementById("inf-hasta").value;
+    if (!desde || !hastaStr) return null;
+    const fin = inputValueToDate(hastaStr + "T00:00");
+    fin.setDate(fin.getDate()+1); // incluir el día "hasta" completo
+    return { inicio: desde, fin, label: `Del ${formatDateEs(desde)} al ${formatDateEs(new Date(fin.getTime()-1))}` };
+  }
+  if (tipo === "mensual"){
+    const val = document.getElementById("inf-mes").value; // "YYYY-MM"
+    if (!val) return null;
+    const [y,m] = val.split("-").map(Number);
+    const inicio = new Date(y, m-1, 1);
+    const fin = new Date(y, m, 1);
+    return { inicio, fin, label: `${MESES_ES[m-1][0].toUpperCase()+MESES_ES[m-1].slice(1)} de ${y}` };
+  }
+  if (tipo === "trimestral"){
+    const anio = Number(document.getElementById("inf-trim-anio").value) || hoy.getFullYear();
+    const trimV = Number(document.getElementById("inf-trim").value);
+    const t = TRIMESTRES_INFORME.find(x=>x.v===trimV) || TRIMESTRES_INFORME[0];
+    const inicio = new Date(anio, t.mesIni, 1);
+    const fin = new Date(anio, t.mesFin+1, 1);
+    return { inicio, fin, label: `${t.label}, ${anio}` };
+  }
+  if (tipo === "anual"){
+    const anio = Number(document.getElementById("inf-anio").value) || hoy.getFullYear();
+    const inicio = new Date(anio, 0, 1);
+    const fin = new Date(anio+1, 0, 1);
+    return { inicio, fin, label: `Año ${anio}` };
+  }
+  return null;
+}
+
+function calcularEstadisticasInforme(partes){
+  const st = {
+    total: partes.length,
+    porTipo: { accidente:0, gafas:0, otros:0 },
+    conAtencionMedica: 0, conAutoridad: 0, conOtraPoliza: 0, conTestigos: 0, conIncidencia: 0,
+    llamadas: 0, segundosTotal: 0, segundosMax: 0
+  };
+  partes.forEach(p=>{
+    const tipo = p.tipo_tramite || "accidente";
+    st.porTipo[tipo] = (st.porTipo[tipo]||0) + 1;
+    if (p.atencion_medica?.si) st.conAtencionMedica++;
+    if (p.intervino_autoridad?.si) st.conAutoridad++;
+    if (p.otra_poliza?.si) st.conOtraPoliza++;
+    if (p.testigos?.si) st.conTestigos++;
+    if (p.incidencia?.marcada) st.conIncidencia++;
+    if (typeof p.tiempo_respuesta_segundos === "number"){
+      st.llamadas++;
+      st.segundosTotal += p.tiempo_respuesta_segundos;
+      st.segundosMax = Math.max(st.segundosMax, p.tiempo_respuesta_segundos);
+    }
+  });
+  st.segundosMedia = st.llamadas ? st.segundosTotal / st.llamadas : null;
+  return st;
+}
+
+function statTile(valor, etiqueta){
+  return `<div class="stat-tile"><div class="stat-valor">${valor}</div><div class="stat-etiqueta">${etiqueta}</div></div>`;
+}
+
+function renderTabInformes(){
+  const el = tabContainer();
+  el.innerHTML = `
+    <div class="card">
+      <div class="card-title"><span>Generar informe</span><span class="tag">partes de accidente</span></div>
+      <div class="field">
+        <label>Tipo de periodo</label>
+        <select id="inf-tipo">
+          <option value="rango">Rango de fechas concreto</option>
+          <option value="mensual">Mensual</option>
+          <option value="trimestral">Trimestral</option>
+          <option value="anual">Anual</option>
+        </select>
+      </div>
+      <div id="inf-periodo-fields"></div>
+      <button class="btn btn-primary" id="inf-generar">Generar informe</button>
+    </div>
+    <div id="inf-resultado"></div>
+  `;
+
+  const hoy = new Date();
+  const camposPorTipo = {
+    rango: `
+      <div class="grid-2">
+        <div class="field"><label>Desde</label><input type="date" id="inf-desde"></div>
+        <div class="field"><label>Hasta</label><input type="date" id="inf-hasta"></div>
+      </div>`,
+    mensual: `
+      <div class="field"><label>Mes</label><input type="month" id="inf-mes" value="${hoy.getFullYear()}-${String(hoy.getMonth()+1).padStart(2,"0")}"></div>`,
+    trimestral: `
+      <div class="grid-2">
+        <div class="field"><label>Trimestre</label>
+          <select id="inf-trim">${TRIMESTRES_INFORME.map(t=>`<option value="${t.v}" ${ (Math.floor(hoy.getMonth()/3)+1)===t.v ? "selected":"" }>${t.label}</option>`).join("")}</select>
+        </div>
+        <div class="field"><label>Año</label><input type="number" id="inf-trim-anio" value="${hoy.getFullYear()}" min="2020" max="2100"></div>
+      </div>`,
+    anual: `
+      <div class="field"><label>Año</label><input type="number" id="inf-anio" value="${hoy.getFullYear()}" min="2020" max="2100"></div>`
+  };
+  const fieldsWrap = document.getElementById("inf-periodo-fields");
+  const tipoSel = document.getElementById("inf-tipo");
+  const pintarCampos = ()=>{ fieldsWrap.innerHTML = camposPorTipo[tipoSel.value]; };
+  tipoSel.addEventListener("change", pintarCampos);
+  pintarCampos();
+
+  document.getElementById("inf-generar").onclick = async ()=>{
+    const rango = calcularRangoInforme(tipoSel.value);
+    const resultado = document.getElementById("inf-resultado");
+    if (!rango){
+      resultado.innerHTML = `<div class="empty-state"><h3>Falta elegir el periodo</h3><p class="muted">Completa las fechas para generar el informe.</p></div>`;
+      return;
+    }
+    resultado.innerHTML = `<p class="muted">Generando informe...</p>`;
+    let todos = [];
+    try{
+      todos = await loadAllPartes();
+    }catch(err){
+      console.error(err);
+      resultado.innerHTML = `<div class="empty-state"><h3>No se pudo cargar</h3><p class="muted">Comprueba la conexión con Firebase.</p></div>`;
+      return;
+    }
+    const partes = todos.filter(p=>{
+      const f = parteFechaElaboracion(p);
+      return f && f >= rango.inicio && f < rango.fin;
+    }).sort((a,b)=> parteFechaElaboracion(b) - parteFechaElaboracion(a));
+    renderInformeResultado(partes, rango);
+  };
+}
+
+function renderInformeResultado(partes, rango){
+  const resultado = document.getElementById("inf-resultado");
+  const st = calcularEstadisticasInforme(partes);
+  const tiposHtml = Object.keys(TIPO_TRAMITE_LABEL_INFORME).map(k=>
+    statTile(st.porTipo[k]||0, TIPO_TRAMITE_LABEL_INFORME[k])
+  ).join("");
+
+  resultado.innerHTML = `
+    <div class="card">
+      <div class="card-title"><span>${esc(rango.label)}</span><span class="tag">${st.total} parte${st.total===1?"":"s"}</span></div>
+      <div class="stat-grid">
+        ${statTile(st.total, "Total de partes")}
+        ${tiposHtml}
+        ${statTile(st.llamadas ? formatDuracionLlamada(st.segundosMedia) : "—", "Duración media de llamada")}
+        ${statTile(st.llamadas ? formatDuracionLlamada(st.segundosTotal) : "—", "Duración total de llamadas")}
+        ${statTile(st.llamadas ? formatDuracionLlamada(st.segundosMax) : "—", "Llamada más larga")}
+        ${statTile(st.conAtencionMedica, "Con atención médica")}
+        ${statTile(st.conAutoridad, "Con intervención de autoridad")}
+        ${statTile(st.conOtraPoliza, "Con otra póliza")}
+        ${statTile(st.conTestigos, "Con testigos")}
+        ${statTile(st.conIncidencia, "Con incidencia marcada")}
+      </div>
+      <button class="btn btn-outline" id="inf-excel" style="margin-top:1em;" ${partes.length===0?"disabled":""}>Descargar Excel del periodo</button>
+    </div>
+    <div class="card">
+      <div class="card-title"><span>Partes del periodo</span></div>
+      <div id="inf-table"></div>
+    </div>
+    <div id="inf-detail"></div>
+  `;
+  renderTablaInforme(partes);
+  if (partes.length){
+    document.getElementById("inf-excel").onclick = ()=>{
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(partes.map(parteToRow)), "Partes del periodo");
+      const resumenRows = [
+        { "Periodo": rango.label, "Total de partes": st.total },
+        ...Object.keys(TIPO_TRAMITE_LABEL_INFORME).map(k=>({ "Periodo": TIPO_TRAMITE_LABEL_INFORME[k], "Total de partes": st.porTipo[k]||0 })),
+        { "Periodo": "Duración media de llamada", "Total de partes": st.llamadas ? formatDuracionLlamada(st.segundosMedia) : "—" },
+        { "Periodo": "Duración total de llamadas", "Total de partes": st.llamadas ? formatDuracionLlamada(st.segundosTotal) : "—" },
+        { "Periodo": "Llamada más larga", "Total de partes": st.llamadas ? formatDuracionLlamada(st.segundosMax) : "—" },
+        { "Periodo": "Con atención médica", "Total de partes": st.conAtencionMedica },
+        { "Periodo": "Con intervención de autoridad", "Total de partes": st.conAutoridad },
+        { "Periodo": "Con otra póliza", "Total de partes": st.conOtraPoliza },
+        { "Periodo": "Con testigos", "Total de partes": st.conTestigos },
+        { "Periodo": "Con incidencia marcada", "Total de partes": st.conIncidencia },
+      ];
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resumenRows), "Resumen");
+      const wbout = XLSX.write(wb, { bookType:"xlsx", type:"array" });
+      const fecha = new Date().toISOString().slice(0,10);
+      downloadBlob(new Blob([wbout], { type:"application/octet-stream" }), `informe-partes_${slugify(rango.label)}_${fecha}.xlsx`);
+    };
+  }
+}
+
+function renderTablaInforme(partes){
+  const el = document.getElementById("inf-table");
+  if (partes.length===0){
+    el.innerHTML = `<div class="empty-state"><h3>Sin partes en este periodo</h3><p>No hay partes elaborados que coincidan con el periodo elegido.</p></div>`;
+    return;
+  }
+  el.innerHTML = `
+    <div class="table-scroll"><table>
+      <thead><tr><th>Fecha elaboración</th><th>Alumno</th><th>Grupo</th><th>Tipo</th><th>Duración llamada</th><th>Expediente</th><th></th></tr></thead>
+      <tbody>
+        ${partes.map(p=>{
+          const s = p.alumno_snapshot||{};
+          return `<tr class="clickable" data-id="${p.id}">
+            <td>${formatDateTimeEs(p.fecha_elaboracion)}</td>
+            <td>${esc(s.apellido1)} ${esc(s.apellido2)}, ${esc(s.nombre)}</td>
+            <td>${esc(s.grupo_clase)}</td>
+            <td>${esc(TIPO_TRAMITE_LABEL_INFORME[p.tipo_tramite||"accidente"])}</td>
+            <td>${typeof p.tiempo_respuesta_segundos === "number" ? formatDuracionLlamada(p.tiempo_respuesta_segundos) : "—"}</td>
+            <td>${esc(p.numero_expediente)||"—"}</td>
+            <td><span class="muted">Ver →</span></td>
+          </tr>`;
+        }).join("")}
+      </tbody>
+    </table></div>
+  `;
+  el.querySelectorAll("tr.clickable").forEach(tr=>{ tr.onclick = ()=> renderParteDetail(tr.dataset.id, "inf-detail"); });
 }
 
 // ---- Fin de curso: copia de seguridad completa + borrado TOTAL y
